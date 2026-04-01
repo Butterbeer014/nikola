@@ -1,13 +1,14 @@
 import streamlit as st
 import pandas as pd
 import time
-from streamlit_echarts import st_echarts
+from streamlit_echarts import st_echarts, JsCode
 from src.core.models import Cluster, NPU, Task, TaskType
 from src.core.simulator import Simulator
 from src.scheduler.strategies import FIFOScheduler, OptimizedScheduler
 from src.vis.charts import render_gantt_chart, render_utilization_heatmap
 import os
 import signal
+import random
 
 # Page Config
 st.set_page_config(
@@ -32,17 +33,42 @@ if st.sidebar.button("🛑 Exit App"):
     # Gracefully kill the process
     os.kill(os.getpid(), signal.SIGTERM)
 
-# Helper: Mock Data Generator
-def generate_mock_tasks(n=10):
+def generate_mock_tasks(n=30):
     tasks = []
+    task_types = [TaskType.TRAINING, TaskType.INFERENCE, TaskType.LORA_FINETUNE]
+    
+    current_time = 0.0
     for i in range(n):
+        t_type = random.choice(task_types)
+        
+        # We increase fragmentation possibility
+        if t_type == TaskType.TRAINING:
+            dur = random.uniform(30.0, 60.0) # Long tasks
+            mem = random.choice([30.0, 31.0]) # Almost occupy full memory
+            n_npu = random.choice([2, 4])     # Requires multiple NPUs
+        elif t_type == TaskType.LORA_FINETUNE:
+            dur = random.uniform(10.0, 25.0)
+            mem = random.choice([16.0, 20.0])
+            n_npu = random.choice([1, 2])
+        else: # INFERENCE
+            dur = random.uniform(5.0, 15.0)
+            mem = random.choice([4.0, 8.0])
+            n_npu = 1
+            
+        # Create bursty batch arrivals so the scheduler queue builds up,
+        # forcing scheduling algorithms to actually compete on queue permutations.
+        if i % 10 == 0:
+            current_time += random.uniform(20.0, 40.0) # Big gap between batches
+        else:
+            current_time += random.uniform(0.0, 1.0) # Arrive almost simultaneously
+            
         tasks.append(Task(
             job_id=f"job_{i}",
-            task_type=TaskType.TRAINING,
-            arrival_time=i * 2.0,
-            duration=10.0,
-            memory_requirement_gb=16.0,
-            npu_requirement=1
+            task_type=t_type,
+            arrival_time=current_time,
+            duration=dur,
+            memory_requirement_gb=mem,
+            npu_requirement=n_npu
         ))
     return tasks
 
@@ -81,9 +107,9 @@ if st.button("Start Simulation"):
     # Run Simulation
     start_time = time.time()
     log = sim.run()
-    duration = time.time() - start_time
+    duration_ms = (time.time() - start_time) * 1000
     
-    st.metric("Simulation Time (Real)", f"{duration:.4f} s")
+    st.metric("Simulation Time (Real)", f"{duration_ms:.4f} ms")
     st.metric("Total Events Processed", len(log))
 
     # Visualization using ECharts
@@ -95,9 +121,9 @@ if st.button("Start Simulation"):
         st.markdown("#### Micro-Gantt (Device Schedule)")
         # Filter only completed or started tasks
         visible_tasks = [t for t in sim.completed_tasks] + [t for t in sim.pending_tasks if t.allocated_npu_ids]
-        gantt_option = render_gantt_chart(visible_tasks)
-        if gantt_option:
-            st_echarts(options=gantt_option, height="400px")
+        gantt_fig = render_gantt_chart(visible_tasks)
+        if gantt_fig is not None:
+            st.plotly_chart(gantt_fig, use_container_width=True)
         else:
             st.info("No schedule to display")
 
@@ -105,7 +131,7 @@ if st.button("Start Simulation"):
         st.markdown("#### Cluster Heatmap")
         # Extract NPU list
         npu_list = sorted(list(cluster.npus.keys()))
-        heatmap_option = render_utilization_heatmap(log, npu_list) # Using dummy logic inside for now
+        heatmap_option = render_utilization_heatmap(visible_tasks, npu_list, sim.current_time)
         if heatmap_option:
             st_echarts(options=heatmap_option, height="400px")
         
@@ -117,7 +143,7 @@ if st.button("Start Simulation"):
     # Save current run
     run_key = f"{algorithm} ({len(tasks)} tasks)"
     st.session_state.results[run_key] = {
-        "duration": duration,
+        "duration_ms": duration_ms,
         "makespan": sim.current_time
     }
     

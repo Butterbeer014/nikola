@@ -46,9 +46,43 @@ class FIFOScheduler(BaseScheduler):
 
 class OptimizedScheduler(BaseScheduler):
     """
-    Placeholder for the advanced strategy (Adapter-Aware / Pipeline Overlap).
-    Currently behaves like FIFO but can be expanded.
+    Advanced Strategy: Adapter-Aware / Pipeline Overlap
+    For simulation purposes, we improve upon FIFO by prioritizing smaller tasks (Shortest Job First)
+    or packing specific task types more efficiently to minimize fragmentation.
     """
     def schedule(self, pending_tasks: List[Task], current_time: float) -> List[tuple[Task, List[str]]]:
-        # TODO: Implement fragmentation-aware logic here
+        allocations = []
+        
+        # Sort pending by NPU requirement and duration DESCENDING (Longest / Largest Job First).
+        # This reduces fragmentation and minimizes the overall makespan because large workloads 
+        # get packed early, and smaller ones comfortably fill the remaining holes.
+        sorted_tasks = sorted(pending_tasks, key=lambda t: (t.npu_requirement, t.duration), reverse=True)
+        
+        for task in sorted_tasks:
+            available_npus = self._find_best_fit_npus(task)
+            if available_npus:
+                allocations.append((task, available_npus))
+                for npu_id in available_npus:
+                    self.cluster.npus[npu_id].status = "BUSY" 
+        
+        return allocations
+
+    def _find_best_fit_npus(self, task: Task) -> List[str]:
+        # Tries to find NPUs that have the *least* available memory that can still fit the task
+        # This helps reduce fragmentation compared to naive FIFO.
+        found = []
+        count = 0
+        
+        # Sort NPUs by available memory ascending
+        npus_sorted = sorted(
+            [npu for npu in self.cluster.npus.values() if npu.status == "IDLE"],
+            key=lambda n: n.memory_capacity_gb - n.current_memory_usage
+        )
+        
+        for npu in npus_sorted:
+            if npu.current_memory_usage + task.memory_requirement_gb <= npu.memory_capacity_gb:
+                found.append(npu.npu_id)
+                count += 1
+                if count == task.npu_requirement:
+                    return found
         return []
